@@ -9,6 +9,7 @@
 namespace Staempfli\ImageResizer\Model;
 
 use Magento\Framework\App\Filesystem\DirectoryList;
+use Magento\Framework\Exception\NoSuchEntityException;
 use Magento\Framework\Filesystem;
 use Magento\Framework\Image\AdapterFactory as imageAdapterFactory;
 use Magento\Framework\UrlInterface;
@@ -93,11 +94,12 @@ class Resizer
 
     /**
      * Resizer constructor.
-     * @param Filesystem $filesystem
-     * @param ImageAdapterFactory $imageAdapterFactory
+     *
+     * @param Filesystem            $filesystem
+     * @param ImageAdapterFactory   $imageAdapterFactory
      * @param StoreManagerInterface $storeManager
-     * @param File $fileIo
-     * @param LoggerInterface $logger
+     * @param File                  $fileIo
+     * @param LoggerInterface       $logger
      */
     public function __construct(
         Filesystem $filesystem,
@@ -107,39 +109,46 @@ class Resizer
         LoggerInterface $logger
     ) {
         $this->imageAdapterFactory = $imageAdapterFactory;
-        $this->mediaDirectoryRead = $filesystem->getDirectoryRead(DirectoryList::MEDIA);
-        $this->storeManager = $storeManager;
-        $this->fileIo = $fileIo;
-        $this->logger = $logger;
+        $this->mediaDirectoryRead  = $filesystem->getDirectoryRead(DirectoryList::MEDIA);
+        $this->storeManager        = $storeManager;
+        $this->fileIo              = $fileIo;
+        $this->logger              = $logger;
     }
 
     /**
      * Resized image and return url
      * - Return original image url if no success
      *
-     * @param string $imageUrl
+     * @param string   $imageUrl
      * @param null|int $width
      * @param null|int $height
-     * @param array $resizeSettings
+     * @param array    $resizeSettings
+     * @param bool     $localPath
      * @return bool|string
      */
-    public function resizeAndGetUrl(string $imageUrl, $width, $height, array $resizeSettings = [])
+    public function resizeAndGetUrl(string $imageUrl, $width, $height, array $resizeSettings = [], $localPath = false)
     {
-        // Set $resultUrl with $fileUrl to return this one in case the resize fails.
-        $resultUrl = $imageUrl;
-        $this->initRelativeFilenameFromUrl($imageUrl);
-        if (!$this->relativeFilename) {
-            return $resultUrl;
+        try {
+            if ($localPath) {
+                $this->relativeFilename = $imageUrl;
+            } else {
+                // Set $resultUrl with $fileUrl to return this one in case the resize fails.
+                $resultUrl = $imageUrl;
+                $this->initRelativeFilenameFromUrl($imageUrl);
+                if (!$this->relativeFilename) {
+                    return $resultUrl;
+                }
+
+                // Check if image is an animated gif return original gif instead of resized still.
+                if ($this->isAnimatedGif($imageUrl)) {
+                    return $resultUrl;
+                }
+            }
+            $this->initSize($width, $height);
+            $this->initResizeSettings($resizeSettings);
+        } catch (\Exception $e) {
+            $this->logger->addError("Staempfli_ImageResizer: could not find image: \n" . $e->getMessage());
         }
-
-        // Check if image is an animated gif return original gif instead of resized still.
-        if ($this->isAnimatedGif($imageUrl)){
-            return $resultUrl;
-        }
-
-        $this->initSize($width, $height);
-        $this->initResizeSettings($resizeSettings);
-
         try {
             // Check if resized image already exists in cache
             $resizedUrl = $this->getResizedImageUrl();
@@ -180,13 +189,14 @@ class Resizer
      *
      * @param string $imageUrl
      * @return bool|mixed|string
+     * @throws NoSuchEntityException
      */
     protected function initRelativeFilenameFromUrl(string $imageUrl)
     {
         $this->relativeFilename = false; // reset filename in case there was another value defined
-        $mediaUrl = $this->storeManager->getStore()->getBaseUrl(UrlInterface::URL_TYPE_MEDIA);
-        $mediaPath = parse_url($mediaUrl, PHP_URL_PATH);
-        $imagePath = parse_url($imageUrl, PHP_URL_PATH);
+        $mediaUrl               = $this->storeManager->getStore()->getBaseUrl(UrlInterface::URL_TYPE_MEDIA);
+        $mediaPath              = parse_url($mediaUrl, PHP_URL_PATH);
+        $imagePath              = parse_url($imageUrl, PHP_URL_PATH);
 
         if (0 === strpos($imagePath, $mediaPath)) {
             $this->relativeFilename = substr_replace($imagePath, '', 0, strlen($mediaPath));
@@ -201,7 +211,7 @@ class Resizer
      */
     protected function initSize($width, $height)
     {
-        $this->width = $width;
+        $this->width  = $width;
         $this->height = $height;
     }
 
@@ -221,7 +231,8 @@ class Resizer
                 $subPath .= "_" . $this->subPathSettingsMapping[$key];
             }
         }
-        return sprintf('%s_%s',$subPath, $this->resizeSettings['quality']);
+
+        return sprintf('%s_%s', $subPath, $this->resizeSettings['quality']);
     }
 
     /**
@@ -233,13 +244,14 @@ class Resizer
      */
     protected function getRelativePathResizedImage()
     {
-        $pathInfo = $this->fileIo->getPathInfo($this->relativeFilename);
+        $pathInfo          = $this->fileIo->getPathInfo($this->relativeFilename);
         $relativePathParts = [
             self::IMAGE_RESIZER_CACHE_DIR,
             $pathInfo['dirname'],
             $this->getResizeSubFolderName(),
             $pathInfo['basename']
         ];
+
         return implode('/', $relativePathParts);
     }
 
@@ -267,6 +279,7 @@ class Resizer
      * Get url of resized image
      *
      * @return bool|string
+     * @throws NoSuchEntityException
      */
     protected function getResizedImageUrl()
     {
@@ -274,6 +287,7 @@ class Resizer
         if ($this->mediaDirectoryRead->isFile($relativePath)) {
             return $this->storeManager->getStore()->getBaseUrl(UrlInterface::URL_TYPE_MEDIA) . $relativePath;
         }
+
         return false;
     }
 
@@ -281,6 +295,7 @@ class Resizer
      * Resize and save new generated image
      *
      * @return bool
+     * @throws \Exception
      */
     protected function resizeAndSaveImage()
     {
@@ -298,6 +313,7 @@ class Resizer
         $imageAdapter->quality($this->resizeSettings['quality']);
         $imageAdapter->resize($this->width, $this->height);
         $imageAdapter->save($this->getAbsolutePathResized());
+
         return true;
     }
 
@@ -340,5 +356,4 @@ class Resizer
 
         return $frames > 1;
     }
-
 }
